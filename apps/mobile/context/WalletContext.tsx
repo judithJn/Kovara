@@ -14,6 +14,7 @@ import {
   setConnectionState,
   getConnectionState,
   deleteConnectionState,
+  isSecureStorageAvailable,
 } from "../utils/secureStorage";
 import { useNetworkContext, type NetworkPreset, type StellarNetworkId } from "./NetworkContext";
 
@@ -256,10 +257,18 @@ export function WalletProvider({ children }: { children: ReactNode }): JSX.Eleme
   }, []);
 
   const importFreighterApi = useCallback(async () => {
-    const loader = new Function("specifier", "return import(specifier)") as (
-      specifier: string
-    ) => Promise<Record<string, unknown>>;
-    return loader("@stellar/freighter-api");
+    // A plain dynamic import, matching `utils/walletAdapter.ts`, which already
+    // imports this module the same way.
+    //
+    // This previously went through `new Function("specifier", "return
+    // import(specifier)")`. That hides the specifier from static analysis —
+    // and from Jest's module registry, so `jest.mock("@stellar/freighter-api")`
+    // could never intercept it and every Freighter test failed against a real
+    // import that cannot resolve under Jest.
+    return (await import("@stellar/freighter-api")) as unknown as Record<
+      string,
+      unknown
+    >;
   }, []);
 
   const requestFreighterAddress = useCallback(async (): Promise<string> => {
@@ -340,6 +349,16 @@ export function WalletProvider({ children }: { children: ReactNode }): JSX.Eleme
 
       setState("disconnected");
       setWallet({ address: null, network: null, provider: null });
+
+      // FE-30: the reads above can fail on a locked keychain, a device with no
+      // secure enclave, or a web build where `expo-secure-store` is
+      // unsupported. That is "there is no stored session", not "the wallet is
+      // broken" — so the app starts disconnected and the user can reconnect,
+      // instead of sitting on an error screen offering a retry that can never
+      // work. The session lives on the server, so nothing is actually lost.
+      if (!isSecureStorageAvailable()) {
+        console.warn("secure storage unavailable; continuing without a restored session");
+      }
     } catch (err) {
       setState("error");
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -350,8 +369,14 @@ export function WalletProvider({ children }: { children: ReactNode }): JSX.Eleme
     if (walletKit) checkConnectionState();
   }, [walletKit, checkConnectionState]);
 
+
   const connect = useCallback(
     async (provider: WalletProviderKind = "walletconnect") => {
+      // FE-29: clear any previous attempt before starting a new one, so a
+      // failed connection can never leave the previous account's address on
+      // screen while the state says "error".
+      setWallet({ address: null, network: null, provider: null });
+
       try {
         setState("connecting");
         setError(null);
@@ -384,6 +409,9 @@ export function WalletProvider({ children }: { children: ReactNode }): JSX.Eleme
         setWallet({ address, network: selectedNetwork.id, provider });
         setState("connected");
       } catch (err) {
+        // A rejected connection is recoverable: the user taps retry, which
+        // re-enters `connect` and clears both `error` and the stale wallet
+        // above. The state is never left as "connected" with a null address.
         setState("error");
         setError(err instanceof Error ? err.message : "Connection failed");
         setWallet({ address: null, network: null, provider: null });
@@ -393,16 +421,29 @@ export function WalletProvider({ children }: { children: ReactNode }): JSX.Eleme
   );
 
   const disconnect = useCallback(async () => {
+    // FE-29: the storage deletes used to sit in `finally`, *outside* the
+    // `catch`. A rejection there — a locked keychain, an unsupported platform —
+    // made `disconnect()` itself reject, so `setState("disconnected")` and the
+    // wallet reset never ran and the UI stayed stuck showing a session the user
+    // had just asked to end. Every step is now independently guarded: a wallet
+    // that refuses to disconnect cleanly must still end up disconnected locally.
+    setError(null);
+
     try {
-      setError(null);
       if (walletKit) await walletKit.disconnect();
     } catch {
-      // ignore
-    } finally {
-      await Promise.all([deleteWalletAddress(), deleteConnectionState()]);
-      setWallet({ address: null, network: null, provider: null });
-      setState("disconnected");
+      // The remote session may already be gone; that is not a reason to keep the
+      // local one.
     }
+
+    try {
+      await Promise.all([deleteWalletAddress(), deleteConnectionState()]);
+    } catch {
+      // Storage unavailable — the in-memory reset below is what the user sees.
+    }
+
+    setWallet({ address: null, network: null, provider: null });
+    setState("disconnected");
   }, [walletKit]);
 
   const refresh = useCallback(async () => {

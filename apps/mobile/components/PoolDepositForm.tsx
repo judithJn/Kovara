@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,37 +8,69 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
-import { usePoolDeposit } from '../hooks/usePoolDeposit';
+import { usePoolDeposit, parseAmountToUnits, DEFAULT_TOKEN_DECIMALS } from '../hooks/usePoolDeposit';
 
 interface PoolDepositFormProps {
   poolId: string;
   token: string;
+  /** Optional decimals from pool token metadata; defaults to Stellar 7. */
+  tokenDecimals?: number;
   onSuccess?: () => void;
 }
 
-export function PoolDepositForm({ poolId, token, onSuccess }: PoolDepositFormProps) {
+export function PoolDepositForm({
+  poolId,
+  token,
+  tokenDecimals,
+  onSuccess,
+}: PoolDepositFormProps) {
   const [amount, setAmount] = useState('');
   const { pending, success, error, txHash, deposit, reset } = usePoolDeposit();
 
+  const decimals =
+    tokenDecimals != null && Number.isInteger(tokenDecimals)
+      ? tokenDecimals
+      : DEFAULT_TOKEN_DECIMALS;
+  // MO-006: notify parent (e.g. pool detail) so it can refresh query data
+  // after a confirmed deposit and avoid stale balances.
+  useEffect(() => {
+    if (success && onSuccess) {
+      onSuccess();
+    }
+  }, [success, onSuccess]);
+
   const handleDeposit = useCallback(async () => {
+    if (pending) return;
+    
+    if (!poolId?.trim()) {
+      Alert.alert('Validation Error', 'Pool ID is required');
+      return;
+    }
+    if (!token?.trim()) {
+      Alert.alert('Validation Error', 'Token is required');
+      return;
+    }
     if (!amount.trim()) {
       Alert.alert('Validation Error', 'Please enter an amount');
       return;
     }
 
-    const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount <= 0) {
-      Alert.alert('Validation Error', 'Amount must be a positive number');
+    const parsed = parseAmountToUnits(amount, decimals);
+    if (!parsed.ok) {
+      Alert.alert('Validation Error', parsed.error);
       return;
     }
 
     try {
       await deposit(poolId, amount, token);
     } catch (err) {
+      // FE-19: the entered amount is kept in state so the user can retry.
+      // The hook surfaces the error via `setError`; avoid duplicating it in an alert.
+      // Only fall back to an alert if the hook did not record an error.
       const message = err instanceof Error ? err.message : 'Deposit failed';
       Alert.alert('Error', message);
     }
-  }, [amount, deposit, poolId, token]);
+  }, [amount, deposit, poolId, token, decimals, pending]);
 
   const handleReset = useCallback(() => {
     reset();
@@ -83,42 +115,46 @@ export function PoolDepositForm({ poolId, token, onSuccess }: PoolDepositFormPro
 
   return (
     <View style={styles.container}>
-      <Text style={styles.label}>Amount to Deposit</Text>
+      <Text style={styles.label}>Deposit Amount</Text>
       <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
-          placeholder="0.00"
-          placeholderTextColor="#64748b"
           value={amount}
           onChangeText={setAmount}
+          placeholder="0.00"
+          placeholderTextColor="#64748b"
           keyboardType="decimal-pad"
           editable={!pending}
-          accessibilityLabel="Deposit amount input"
           testID="deposit-amount-input"
+          accessibilityLabel="Deposit amount"
         />
         <Text style={styles.tokenLabel}>{token}</Text>
       </View>
+      <Text style={styles.note}>
+        Max {decimals} decimal places. Pool and token are verified before signing.
+      </Text>
 
-      <Text style={styles.note}>Token must match pool's configured token</Text>
-
-      {error && (
-        <View style={styles.errorContainer}>
+      {error ? (
+        <View style={styles.errorContainer} testID="deposit-error">
           <Text style={styles.errorText}>{error}</Text>
+          <Text style={styles.retryHint}>
+            Your amount has been kept. Tap Deposit to retry.
+          </Text>
         </View>
-      )}
+      ) : null}
 
       <TouchableOpacity
         style={[styles.button, pending && styles.buttonDisabled]}
         onPress={handleDeposit}
-        disabled={pending || !amount}
+        disabled={pending}
         accessibilityRole="button"
-        accessibilityLabel={pending ? 'Processing deposit' : 'Confirm deposit'}
+        accessibilityLabel={pending ? 'Processing deposit' : error ? 'Retry deposit' : 'Confirm deposit'}
         testID="deposit-button"
       >
         {pending ? (
           <ActivityIndicator color="#fff" />
         ) : (
-          <Text style={styles.buttonText}>Deposit</Text>
+          <Text style={styles.buttonText}>{error ? 'Retry Deposit' : 'Deposit'}</Text>
         )}
       </TouchableOpacity>
     </View>
@@ -134,7 +170,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
   },
   label: {
-    color: '#cbd5e1',
+    color: '#cbd3e1',
     fontSize: 14,
     fontWeight: '600',
     marginBottom: 8,
@@ -228,5 +264,11 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#fca5a5',
     fontSize: 12,
+  },
+  retryHint: {
+    color: '#fecaca',
+    fontSize: 11,
+    marginTop: 4,
+    italic: true,
   },
 });

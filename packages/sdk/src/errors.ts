@@ -1,125 +1,83 @@
-/**
- * Base class for all Kovara SDK errors.
+/*
+ * Typed errors thrown by the indexer client and Kovara SDK helpers.
  */
-export class KovaraError extends Error {
-  constructor(
-    message: string,
-    public readonly originalError?: unknown
-  ) {
+export class IndexerError extends Error {
+  readonly statusCode: number;
+  readonly cause?: unknown;
+
+  constructor(message: string, statusCode = 0, cause?: unknown) {
     super(message);
-    this.name = this.constructor.name;
-    // Set prototype explicitly to support instanceof checks in compiled environments.
-    Object.setPrototypeOf(this, new.target.prototype);
+    this.name = "IndexerError";
+    this.statusCode = statusCode;
+    this.cause = cause;
   }
 }
 
 /**
- * Thrown when a requested resource (e.g. post, pool, or profile) does not exist on-chain.
+ * Map an HTTP status + optional body snippet into an IndexerError.
  */
-export class NotFoundError extends KovaraError {}
-
-/**
- * Thrown when the caller is unauthorized (e.g., trying to modify another user's post,
- * pool withdraw without being a pool admin, or trying to interact with a blocker).
- */
-export class UnauthorizedError extends KovaraError {}
-
-/**
- * Thrown when the caller has insufficient funds or insufficient token allowance for operations.
- */
-export class InsufficientBalanceError extends KovaraError {}
-
-/**
- * Thrown when the tipping cooldown window is active.
- */
-export class CooldownError extends KovaraError {}
-
-/**
- * Thrown when input parameters fail pre-flight validation (invalid username, post content length limits, etc.).
- */
-export class InvalidInputError extends KovaraError {}
-
-/**
- * Thrown when the indexer returns a non-200 HTTP response.
- * Carries the HTTP `statusCode` so callers can surface context-specific messages.
- */
-export class IndexerError extends KovaraError {
-  constructor(
-    message: string,
-    public readonly statusCode: number,
-    originalError?: unknown
-  ) {
-    super(message, originalError);
+export function mapHttpError(status: number, bodySnippet?: string): IndexerError {
+  const detail = bodySnippet?.trim() ? `: ${bodySnippet.trim().slice(0, 200)}` : "";
+  switch (status) {
+    case 400:
+      return new IndexerError(`Bad request${detail}`, 400);
+    case 401:
+      return new IndexerError(`Unauthorized${detail}`, 401);
+    case 403:
+      return new IndexerError(`Forbidden${detail}`, 403);
+    case 404:
+      return new IndexerError(`Not found${detail}`, 404);
+    case 429:
+      return new IndexerError(`Too many requests${detail}`, 429);
+    case 502:
+      return new IndexerError(`Bad gateway${detail}`, 502);
+    case 503:
+      return new IndexerError(`Service unavailable${detail}`, 503);
+    case 504:
+      return new IndexerError(`Gateway timeout${detail}`, 504);
+    default:
+      if (status >= 500) {
+        return new IndexerError(`Server error (${status})${detail}`, status);
+      }
+      return new IndexerError(`Request failed (${status})${detail}`, status);
   }
 }
 
 /**
- * Thrown when a mini-app manifest fails JSON schema validation.
+ * Thrown when a reward amount is invalid (e.g. outside configured bounds).
  */
-export class InvalidManifestError extends KovaraError {}
+export class RewardAmountError extends Error {
+  readonly amount: number;
+  readonly min?: number;
+  readonly max?: number;
+  readonly cause?: unknown;
 
-/**
- * Maps a raw error string or transaction simulation response error to a specific KovaraError subclass.
- *
- * @param err The caught raw error object or string.
- * @returns A typed KovaraError instance.
- */
-/**
- * Converts a non-200 HTTP response into an `IndexerError` with an appropriate message.
- * Use this wherever you call the indexer REST API.
- *
- * @param statusCode The HTTP status code returned by the indexer.
- * @param body Optional response body text for additional context.
- */
-export function mapHttpError(statusCode: number, body?: string): IndexerError {
-  const detail = body ? `: ${body}` : "";
-  if (statusCode === 404) {
-    return new IndexerError(`Indexer: resource not found${detail}`, statusCode);
+  constructor(amount: number, min?: number, max?: number, cause?: unknown) {
+    const range = min !== undefined && max !== undefined ? `( allowed: ${min}-${max})` : "";
+    const message = `Reward amount ${amount} is invalid${range}`;
+    super(message);
+    this.name = "RewardAmountError";
+    this.amount = amount;
+    this.min = min;
+    this.max = max;
+    this.cause = cause;
   }
-  if (statusCode === 429) {
-    return new IndexerError(`Indexer: rate limit exceeded${detail}`, statusCode);
-  }
-  if (statusCode === 401 || statusCode === 403) {
-    return new IndexerError(`Indexer: access denied${detail}`, statusCode);
-  }
-  if (statusCode === 503) {
-    return new IndexerError(`Indexer: service unavailable${detail}`, statusCode);
-  }
-  if (statusCode === 502 || statusCode === 504) {
-    return new IndexerError(`Indexer: gateway error${detail}`, statusCode);
-  }
-  if (statusCode >= 500) {
-    return new IndexerError(`Indexer: internal server error (${statusCode})${detail}`, statusCode);
-  }
-  return new IndexerError(`Indexer: unexpected status ${statusCode}${detail}`, statusCode);
 }
 
-export function mapError(err: unknown): Error {
-  // Pass through already-typed SDK errors unchanged.
-  if (err instanceof KovaraError) return err;
-  const msg = err instanceof Error ? err.message : String(err);
+/**
+ * Thrown when the treasury balance is insufficient to cover a reward payout.
+ */
+export class InsufficientFundsError extends Error {
+  readonly required: number;
+  readonly available: number;
+  readonly cause?: unknown;
 
-  if (/allowance|insufficient allowance/i.test(msg)) {
-    return new InsufficientBalanceError("Insufficient allowance to complete transaction.", err);
+  constructor(required: number, available: number, cause?: unknown) {
+    const message = `Insufficient funds: required ${required}, available ${available}`;
+    super(message);
+    this.name = "InsufficientFundsError";
+    this.required = required;
+    this.available = available;
+    this.cause = cause;
   }
-  if (/balance|low balance|insufficient balance/i.test(msg)) {
-    return new InsufficientBalanceError("Insufficient account balance for this transaction.", err);
-  }
-  if (/unauthorized|not admin|only admin|only author/i.test(msg)) {
-    return new UnauthorizedError("Unauthorized operation. You do not have permission.", err);
-  }
-  if (/blocked/i.test(msg)) {
-    return new UnauthorizedError("Operation rejected: user has blocked you.", err);
-  }
-  if (/not found|does not exist/i.test(msg)) {
-    return new NotFoundError("The requested resource was not found.", err);
-  }
-  if (/cooldown/i.test(msg)) {
-    return new CooldownError("Tipping cooldown has not expired yet.", err);
-  }
-  if (/invalid|too long|must be positive|cannot exceed/i.test(msg)) {
-    return new InvalidInputError(`Invalid input parameters: ${msg}`, err);
-  }
-
-  return new KovaraError(msg, err);
 }

@@ -1,165 +1,49 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+
 import { Post } from "../components/PostCard";
 import { IndexerError } from "../../../packages/sdk/src/errors";
 import type { IndexerErrorCode } from "../components/states/ErrorState";
+import { listPosts as fetchPostsFromIndexer } from "../utils/indexerClient";
 
 const PAGE_SIZE = 10;
-const deletedPostIds = new Set<string>();
-const deleteListeners = new Set<() => void>();
 
-const ALL_POSTS: Post[] = [
-  {
-    id: 1,
-    author: "GABCD1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "stellar_dev",
-    content: "Just deployed my first smart contract on Stellar! 🚀",
-    tip_total: 100,
-    timestamp: Math.floor(Date.now() / 1000) - 3600,
-    like_count: 5,
-  },
-  {
-    id: 2,
-    author: "GXYZ9876543210ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "crypto_enthusiast",
-    content: "The SocialFi ecosystem is growing fast. Excited to be part of it!",
-    tip_total: 50,
-    timestamp: Math.floor(Date.now() / 1000) - 7200,
-    like_count: 3,
-  },
-  {
-    id: 3,
-    author: "GABCD1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "stellar_dev",
-    content: "Working on a new DeFi protocol. Stay tuned! 🔥",
-    tip_total: 200,
-    timestamp: Math.floor(Date.now() / 1000) - 14400,
-    like_count: 12,
-  },
-  {
-    id: 4,
-    author: "GDEF5678901234ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "Kovara_fan",
-    content: "Kovara is the future of decentralised social. #Stellar",
-    tip_total: 75,
-    timestamp: Math.floor(Date.now() / 1000) - 21600,
-    like_count: 8,
-  },
-  {
-    id: 5,
-    author: "GHIJ1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "soroban_builder",
-    content: "Soroban smart contracts make on-chain social possible. 🌟",
-    tip_total: 300,
-    timestamp: Math.floor(Date.now() / 1000) - 28800,
-    like_count: 20,
-  },
-];
+// Status codes rendered as badges in the ErrorState component. Anything
+// outside this set falls back to `500` so the cast in `setErrorCode` stays
+// type-safe.
+const RENDERABLE_ERROR_CODES: ReadonlySet<IndexerErrorCode> = new Set([
+  400, 401, 403, 404, 429, 500, 502, 503, 504,
+]);
 
-function isDeleted(postId: Post["id"]): boolean {
-  return deletedPostIds.has(String(postId));
-}
-
-export function getFeedPostById(postId: string): Post | null {
-  return ALL_POSTS.find((post) => String(post.id) === postId && !isDeleted(post.id)) ?? null;
-}
-
-export function markFeedPostDeleted(postId: string | number): void {
-  deletedPostIds.add(String(postId));
-  deleteListeners.forEach((listener) => listener());
-}
-
-export function subscribeToDeletedPosts(listener: () => void): () => void {
-  deleteListeners.add(listener);
-  return () => {
-    deleteListeners.delete(listener);
-  };
-}
-
-const ALL_POSTS: Post[] = [
-  {
-    id: 1,
-    author: "GABCD1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "stellar_dev",
-    content: "Just deployed my first smart contract on Stellar!",
-    tip_total: 100,
-    timestamp: Math.floor(Date.now() / 1000) - 3600,
-    like_count: 5,
-  },
-  {
-    id: 2,
-    author: "GXYZ9876543210ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "crypto_enthusiast",
-    content: "The SocialFi ecosystem is growing fast. Excited to be part of it!",
-    tip_total: 50,
-    timestamp: Math.floor(Date.now() / 1000) - 7200,
-    like_count: 3,
-  },
-  {
-    id: 3,
-    author: "GABCD1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "stellar_dev",
-    content: "Working on a new DeFi protocol. Stay tuned!",
-    tip_total: 200,
-    timestamp: Math.floor(Date.now() / 1000) - 14400,
-    like_count: 12,
-  },
-  {
-    id: 4,
-    author: "GDEF5678901234ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "Kovara_fan",
-    content: "Kovara is the future of decentralised social. #Stellar",
-    tip_total: 75,
-    timestamp: Math.floor(Date.now() / 1000) - 21600,
-    like_count: 8,
-  },
-  {
-    id: 5,
-    author: "GHIJ1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "soroban_builder",
-    content: "Soroban smart contracts make on-chain social possible.",
-    tip_total: 300,
-    timestamp: Math.floor(Date.now() / 1000) - 28800,
-    like_count: 20,
-  },
-];
-
-const deletedPostIds = new Set<string>();
-const postChangeListeners = new Set<(deletedPostId: string) => void>();
-
-export function getFeedPost(postId: string): Post | null {
-  if (deletedPostIds.has(postId)) {
-    return null;
+function clampStatusCode(raw: number | undefined): IndexerErrorCode {
+  if (typeof raw === "number" && RENDERABLE_ERROR_CODES.has(raw as IndexerErrorCode)) {
+    return raw as IndexerErrorCode;
   }
-
-  return ALL_POSTS.find((post) => String(post.id) === postId) ?? null;
-}
-
-export function markFeedPostDeleted(postId: string): void {
-  deletedPostIds.add(postId);
-  postChangeListeners.forEach((listener) => listener(postId));
-}
-
-export function subscribeToFeedPostChanges(listener: (deletedPostId: string) => void): () => void {
-  postChangeListeners.add(listener);
-  return () => {
-    postChangeListeners.delete(listener);
-  };
+  return 500;
 }
 
 /**
- * Fetches a page of posts using cursor-based pagination.
- *
- * Replace the mock implementation with real `get_post` contract calls
- * once the Soroban client is wired up.
+ * Module-level listener set used to broadcast soft-deletes from any screen
+ * to any useFeed instance. IDs are kept as strings to stay consistent with
+ * the PostCard's key extraction.
  */
-async function fetchPostPage(cursor: number, limit: number): Promise<Post[]> {
-  await new Promise<void>((resolve) => setTimeout(resolve, 400));
+const deletionListeners = new Set<(deletedPostId: string) => void>();
 
-  const visiblePosts = ALL_POSTS.filter((post) => !deletedPostIds.has(String(post.id)));
+/**
+ * Notify every mounted `useFeed` that a post was soft-deleted so the post
+ * can be removed from its local cache immediately. Used by `useDeletePost`
+ * after a successful indexer delete-deletion, and by the post detail screen
+ * after a confirmed deletion.
+ */
+export function markFeedPostDeleted(postId: string | number): void {
+  const id = String(postId);
+  deletionListeners.forEach((listener) => listener(id));
+}
 
-  // cursor is the last seen post id (0 = start from beginning)
-  const startIndex = cursor === 0 ? 0 : visiblePosts.findIndex((p) => p.id === cursor) + 1;
-  return visiblePosts.slice(startIndex, startIndex + limit);
+export function subscribeToFeedPostChanges(listener: (deletedPostId: string) => void): () => void {
+  deletionListeners.add(listener);
+  return () => {
+    deletionListeners.delete(listener);
+  };
 }
 
 export interface UseFeedReturn {
@@ -172,6 +56,45 @@ export interface UseFeedReturn {
   refresh: () => void;
 }
 
+/**
+ * How a load treats the posts already on screen.
+ *
+ * `replace` overwrites the feed (first load, refresh) and always reads from
+ * offset zero. `append` adds one page after the current cursor.
+ */
+type LoadMode = "replace" | "append";
+
+/**
+ * Paginated feed with **serialized** requests.
+ *
+ * ## Why requests are serialized
+ *
+ * `loading` is React state, so it does not change until the next render. Two
+ * `loadMore()` calls in the same tick both observe `loading === false` and
+ * both fire. Both read the same cursor, both request the same page, and the
+ * feed ends up showing that page twice.
+ *
+ * Two mechanisms prevent that, and they solve different halves of the problem:
+ *
+ * 1. **A promise chain** (`chainRef`) guarantees only one request is ever in
+ *    flight. Every load is appended to the chain, so ordering is explicit
+ *    rather than implied by whichever `await` happened to resolve first.
+ * 2. **A pending-append flag** (`appendPendingRef`) makes a burst of
+ *    `loadMore()` calls enqueue *one* page request, not N. Without it the
+ *    chain would faithfully serialize three identical appends.
+ *
+ * The cursor is read at **execution** time rather than at call time. A queued
+ * append therefore uses the position the previous page left behind, which is
+ * what makes the chain correct rather than merely ordered.
+ *
+ * ## Why a failed load leaves the feed alone
+ *
+ * `setPosts` is only reached on success. On failure the posts, the cursor and
+ * `hasMore` all keep the values that describe what is on screen, so the feed
+ * stays consistent and the next attempt resumes from a valid position.
+ * `refresh()` always reads from offset zero, so a retry after a failed refresh
+ * starts over from the first page rather than resuming mid-list.
+ */
 export function useFeed(): UseFeedReturn {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
@@ -179,39 +102,63 @@ export function useFeed(): UseFeedReturn {
   const [errorCode, setErrorCode] = useState<IndexerErrorCode | undefined>(undefined);
   const [hasMore, setHasMore] = useState(true);
 
-  // cursor = id of the last loaded post (0 = initial load)
-  const cursorRef = useRef<number>(0);
-  const loadingRef = useRef(false);
+  // Cursor: how many records are already displayed. Advanced only by a
+  // successful load, so it always describes the posts currently on screen.
+  const offsetRef = useRef(0);
 
-  const load = useCallback(async (cursor: number, replace: boolean) => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
+  // Tail of the serialized load chain.
+  const chainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  // Whether an append is queued or in flight, so a burst of `loadMore()`
+  // calls enqueues a single page request.
+  const appendPendingRef = useRef(false);
+
+  const runLoad = useCallback(async (mode: LoadMode) => {
+    // Read the cursor now, not when the request was queued: a serialized
+    // append must start where the previous page finished.
+    const offset = mode === "replace" ? 0 : offsetRef.current;
+
     setLoading(true);
     setError(null);
     setErrorCode(undefined);
 
     try {
-      const fetched = await fetchPostPage(cursor, PAGE_SIZE);
-      setPosts((prev) => (replace ? fetched : [...prev, ...fetched]));
-      setHasMore(fetched.length >= PAGE_SIZE);
-      if (fetched.length > 0) {
-        cursorRef.current = Number(fetched[fetched.length - 1].id);
+      const { posts: fetched, hasMore: more } = await fetchPostsFromIndexer(PAGE_SIZE, offset, {});
+      if (mode === "replace") {
+        setPosts(fetched);
+        offsetRef.current = fetched.length;
+      } else {
+        setPosts((prev) => [...prev, ...fetched]);
+        offsetRef.current = offset + fetched.length;
       }
+      setHasMore(more);
     } catch (e) {
+      // Deliberately no `setPosts` here: a failed refresh must leave the
+      // current feed on screen, and the cursor must keep describing it.
       if (e instanceof IndexerError) {
-        setErrorCode(e.statusCode as IndexerErrorCode);
+        setErrorCode(clampStatusCode(e.statusCode));
         setError(e.message);
       } else {
         setError("Failed to load posts. Please try again.");
       }
     } finally {
       setLoading(false);
-      loadingRef.current = false;
     }
   }, []);
 
+  const load = useCallback(
+    (mode: LoadMode): Promise<void> => {
+      const run = chainRef.current.then(() => runLoad(mode));
+      // Keep the chain usable after a rejection, so one failed load does not
+      // poison every load that follows it.
+      chainRef.current = run.catch(() => undefined);
+      return run;
+    },
+    [runLoad],
+  );
+
   useEffect(() => {
-    load(0, true);
+    void load("replace");
   }, [load]);
 
   useEffect(() => {
@@ -221,14 +168,18 @@ export function useFeed(): UseFeedReturn {
   }, []);
 
   const loadMore = useCallback(() => {
-    if (!loading && hasMore) {
-      load(cursorRef.current, false);
-    }
-  }, [loading, hasMore, load]);
+    if (!hasMore) return;
+    // A page request is already queued or in flight; this tap adds nothing.
+    if (appendPendingRef.current) return;
+    appendPendingRef.current = true;
+    void load("append").finally(() => {
+      appendPendingRef.current = false;
+    });
+  }, [hasMore, load]);
 
   const refresh = useCallback(() => {
-    cursorRef.current = 0;
-    load(0, true);
+    // Queued behind anything already running, and always reads from offset 0.
+    void load("replace");
   }, [load]);
 
   return { posts, loading, error, errorCode, hasMore, loadMore, refresh };
