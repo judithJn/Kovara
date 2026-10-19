@@ -331,3 +331,103 @@ describe("validation / profile username (BE-06)", () => {
     if (!parsed.ok) expect(parsed.issue.field).toBe("display_name");
   });
 });
+
+// ── BE-31: Reject unsafe numeric identifiers ──────────────────────────────
+
+describe("numeric id safety (BE-31)", () => {
+  it("rejects a negative id with INVALID_ID", () => {
+    const result = parseNumericId("-1");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issue.code).toBe("INVALID_ID");
+  });
+
+  it("rejects a fractional id with INVALID_ID", () => {
+    for (const frac of ["1.5", "0.1", "99.99"]) {
+      const result = parseNumericId(frac);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.issue.code).toBe("INVALID_ID");
+    }
+  });
+
+  it("rejects a hex-encoded id with INVALID_ID", () => {
+    const result = parseNumericId("0xff");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issue.code).toBe("INVALID_ID");
+  });
+
+  it("rejects a string with leading digits followed by letters with INVALID_ID", () => {
+    for (const bad of ["123abc", "1e10"]) {
+      const result = parseNumericId(bad);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.issue.code).toBe("INVALID_ID");
+    }
+  });
+
+  it("accepts zero as a valid non-negative id", () => {
+    const result = parseNumericId("0");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe(BigInt(0));
+  });
+
+  it("preserves ids above Number.MAX_SAFE_INTEGER exactly (no precision loss)", () => {
+    const unsafe = "9007199254740993"; // 2^53 + 1
+    const result = parseNumericId(unsafe);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.toString()).toBe(unsafe);
+  });
+
+  it("rejects null and object inputs with INVALID_ID", () => {
+    for (const bad of [null, {}, [], true]) {
+      const result = parseNumericId(bad);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.issue.code).toBe("INVALID_ID");
+    }
+  });
+});
+
+// ── BE-32: Normalize optional address filters ─────────────────────────────
+
+describe("optional Stellar address normalization (BE-32)", () => {
+  it("treats undefined as absent — returns { ok: true, value: undefined }", () => {
+    expect(parseOptionalStellarAddress(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it("treats null as absent — returns { ok: true, value: undefined }", () => {
+    expect(parseOptionalStellarAddress(null)).toEqual({ ok: true, value: undefined });
+  });
+
+  it("treats an empty string as absent — returns { ok: true, value: undefined }", () => {
+    expect(parseOptionalStellarAddress("")).toEqual({ ok: true, value: undefined });
+  });
+
+  it("accepts a well-formed address when present", () => {
+    const VALID = "GAZJ2EQV2ES6R5BLUNXMNFR5VN3HQF4KXJ2GM5Q7GQHT5XBC2CRX3GK3";
+    expect(parseOptionalStellarAddress(VALID)).toEqual({ ok: true, value: VALID });
+  });
+
+  it("rejects a malformed address even when the field is optional", () => {
+    const result = parseOptionalStellarAddress("GABC123");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issue.code).toBe("INVALID_ADDRESS");
+      expect(result.issue.field).toBe("address");
+    }
+  });
+
+  it("uses the caller-supplied field name on failure", () => {
+    const result = parseOptionalStellarAddress("bad", "wallet_filter");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issue.field).toBe("wallet_filter");
+      expect(result.issue.code).toBe("INVALID_ADDRESS");
+    }
+  });
+
+  it("rejects a non-string value that is not null/undefined as malformed", () => {
+    for (const bad of [42, {}, ["G"]]) {
+      const result = parseOptionalStellarAddress(bad);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.issue.code).toBe("INVALID_ADDRESS");
+    }
+  });
+});

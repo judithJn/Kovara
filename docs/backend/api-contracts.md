@@ -79,6 +79,35 @@ The result is a uniform contract:
   fails, rather than being silently ignored by the rate limiter and falling back
   to IP-based accounting.
 
+#### Unsafe numeric identifier rejection (BE-31)
+
+`parseNumericId` rejects all inputs that are not a non-negative integer string,
+**before** any database call:
+
+- Negative values (`-1`, `-99`) → `400 INVALID_ID`
+- Fractional values (`1.5`, `0.1`) → `400 INVALID_ID`
+- Hex / scientific notation (`0xff`, `1e10`) → `400 INVALID_ID`
+- Strings with trailing letters (`123abc`) → `400 INVALID_ID`
+- Non-string, non-number types (`null`, `{}`) → `400 INVALID_ID`
+- Values above `Number.MAX_SAFE_INTEGER` are preserved exactly as `bigint`
+  (no silent rounding).
+
+#### Optional address filter normalization (BE-32)
+
+Endpoints that accept an optional wallet address filter (`author`, wallet
+lookup parameters) use `parseOptionalStellarAddress`:
+
+| Input | Interpretation |
+| --- | --- |
+| `undefined` / `null` / `""` | Absent — no filter applied; proceeds to business logic |
+| A valid Stellar address | Filter applied |
+| A malformed address | `400 INVALID_ADDRESS` — rejected before business logic |
+
+This means a client that omits the filter, sends an empty string, or sends
+`null` all get the same "no filter" behaviour. A client that sends a value that
+looks like an address but is malformed (wrong alphabet, wrong length) is
+rejected with the same `INVALID_ADDRESS` code as any other address failure.
+
 | Code | Meaning |
 | --- | --- |
 | `400 INVALID_ADDRESS` | Address missing/blank, or not a base-32 `G…` Stellar public key (`x-stellar-address` included) |
@@ -216,18 +245,51 @@ both and an idempotent retry would look like a failure.
 
 ### Search
 
-| Method | Path | Body |
+| Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/api/v1/search/posts` | `{ "query": string, "limit"?: number, "offset"?: number }` |
+| POST | `/api/v1/search/posts` | Legacy post-only search. |
+| GET | `/api/v1/search?q=<term>&type=<entities>&limit=<n>&offset=<n>` | Ranked multi-entity search. |
+| GET | `/api/v1/search/facets?q=<term>` | Per-entity match counts. |
+| GET | `/api/v1/search/cache` | Operator view of the search response cache. |
 
-- `query` is required, trimmed, whitespace-collapsed, and capped at 500 characters.
-- `limit` default 20, max 100; `offset` default 0.
-- Response: `{ posts, total, has_more, next_offset, prev_offset }` where each post
-  is `{ id, author, content, tip_total, like_count, created_at, deleted }` and the
-  bigint fields are serialized as strings.
+#### Query validation and whitespace normalization (BE-26 / BE-28)
+
+All search queries pass through `normalizeQuery` before validation or execution:
+
+1. Leading and trailing whitespace is trimmed.
+2. Internal runs of whitespace (spaces, tabs, newlines) are collapsed to a
+   single space.
+
+So `"  foo   bar  "` and `"foo bar"` execute the same query and share the same
+cache entry. Normalization is applied **before** the length check, so trailing
+padding cannot be used to bypass the cap.
+
+After normalization:
+
+- An empty or whitespace-only query is rejected with `400 INVALID_QUERY`.
+- A normalized query longer than **200 characters** is rejected with `400 QUERY_TOO_LONG`.
+- Boundary: a 200-character query is accepted; a 201-character query is rejected.
+
+#### Bounded search result payload size (BE-29)
+
+- `limit` default **20**, max **100**; a value above 100 is `400 LIMIT_EXCEEDED`.
+- `offset` default 0, max 10 000; above max is `400 OFFSET_EXCEEDED`.
+
+These bounds are enforced in the route handler before the store is called, so
+an oversized `limit` cannot be used to pull the whole search index through the
+cache in one request.
+
+Response:
+
+```json
+{ "hits": [ … ], "total": 0, "limit": 20, "offset": 0, "has_more": false, "normalized_query": "…" }
+```
+
+Each hit: `{ entity, id, title, snippet, score, attributes }`.
 
 Errors: `400 INVALID_QUERY`, `400 QUERY_TOO_LONG`, `400 LIMIT_EXCEEDED`,
-`500 SEARCH_UNAVAILABLE`.
+`400 INVALID_LIMIT`, `400 INVALID_OFFSET`, `400 OFFSET_EXCEEDED`,
+`400 INVALID_SEARCH_TYPE`, `500 SERIALIZATION_FAILED`.
 
 ### Follows
 
@@ -369,12 +431,13 @@ returned. Use `X-Correlation-Id` to match a response to server-side diagnostics.
 | 400 | `MALFORMED_JSON` | `express.json()` syntax error |
 | 400 | `INVALID_QUERY` / `LIMIT_EXCEEDED` / `QUERY_TOO_LONG` | Route parameter validation |
 | 400 | `INVALID_ADDRESS` / `INVALID_ID` / `INVALID_CURSOR` | Route parameter validation (issue #665) |
+| 400 | `INVALID_LIMIT` / `INVALID_OFFSET` / `OFFSET_EXCEEDED` / `INVALID_SEARCH_TYPE` | Search parameter validation |
 | 401 | `UNAUTHORIZED` | Debug token mismatch |
 | 404 | `NOT_FOUND` | Route-level or 404 catch-all |
 | 422 | `INVALID_THRESHOLD` | Pool threshold validation |
 | 429 | `RATE_LIMIT_EXCEEDED` | Rate limiter |
 | 500 | `INTERNAL_ERROR` | Unhandled error |
-| 500 | `SEARCH_UNAVAILABLE` | Search backend missing |
+| 500 | `SERIALIZATION_FAILED` | Search response serialization failure |
 | 503 | `DATABASE_UNAVAILABLE` | Database error detected |
 | 503 | `REQUEST_TIMEOUT` | Request exceeded `REQUEST_TIMEOUT_MS` |
 | 503 | `DEBUG_DISABLED` | `DEBUG_TOKEN` not set |
