@@ -64,6 +64,10 @@ The result is a uniform contract:
 - Every validation failure returns **exactly** `{ "error": string, "code": string }`
   with status `400` — the same `ApiErrorResponse` envelope used by the rest of
   the API. No endpoint invents its own shape or code.
+- **Typed error details (BE-30).** Internally, every failure is represented as a
+  `ValidationIssue { status, code, error, field }`. The `field` property names the
+  request field that failed (never the submitted value) and is available for
+  structured server logging. The HTTP response body uses only `error` and `code`.
 - **Wallet addresses are security-sensitive.** An address must be a Stellar
   public key: `G` followed by 55 characters from the base-32 alphabet
   `A–Z`, `2–7`. The digits `0`, `1`, `8`, `9` are rejected (they never appear in
@@ -334,10 +338,32 @@ Mounted only when `EXPERIMENTAL_FEATURES === "true"`.
 | --- | --- | --- |
 | GET | `/api/v1/pools?limit=<n>&offset=<n>` | `limit` default 20, max 100. |
 | GET | `/api/v1/pools/:id` | Enriches the pool with token metadata. |
+| GET | `/api/v1/pools/:id/liquidity` | Liquidity view for one pool. |
+| GET | `/api/v1/pools/:id/membership/:address` | Membership check. |
+| GET | `/api/v1/pools/liquidity` | Whole-system liquidity summary. |
 
 Each pool is serialized with optional `token_name`, `token_symbol`,
 `token_decimals`; when metadata lookups fail the values fall back to
 `"unknown"`, `"UNK"`, `7`.
+
+#### Not-found contract (BE-25)
+
+All pool routes that accept a pool `:id` share one consistent not-found response:
+
+```json
+{ "error": "Pool not found", "code": "NOT_FOUND" }
+```
+
+with HTTP status `404`. The body contains **exactly** `error` and `code` — no
+extra keys. This applies uniformly to:
+
+- `GET /pools/:id`
+- `GET /pools/:id/liquidity`
+- `GET /pools/:id/membership/:address`
+
+A pool that exists but has a zero balance returns `200` from the liquidity
+endpoint with `active: false` — "no balance" is a valid state, not a missing
+pool. Only a pool that does not exist at all is a `404`.
 
 Errors: `400 INVALID_QUERY`, `400 LIMIT_EXCEEDED`,
 `400 INVALID_ID`, `404 NOT_FOUND`, `422 INVALID_THRESHOLD`.

@@ -23,7 +23,9 @@ import {
   sendValidationError,
   validate,
   isStellarAddress,
+  ValidationIssue,
 } from "../validation";
+import { MAX_QUERY_LENGTH, validateQuery, normalizeQuery } from "../../search/store";
 
 const VALID = "GAZJ2EQV2ES6R5BLUNXMNFR5VN3HQF4KXJ2GM5Q7GQHT5XBC2CRX3GK3";
 const VALID_2 = "GBZX4364PEPQTDICMIQDZ56K4T75QZCR4NBEYKO6PDRJAHZKGUOJPCXB";
